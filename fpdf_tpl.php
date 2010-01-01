@@ -1,8 +1,8 @@
 <?php
 //
-//  FPDF_TPL - Version 1.1.2
+//  FPDF_TPL - Version 1.1.3
 //
-//    Copyright 2004-2008 Setasign - Jan Slabon
+//    Copyright 2004-2009 Setasign - Jan Slabon
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -47,6 +47,13 @@ class FPDF_TPL extends FPDF {
      * @var array
      */
     var $_res = array();
+    
+    /**
+     * Last used Template data
+     *
+     * @var array
+     */
+    var $lastUsedTemplateData = array();
     
     /**
      * Start a Template
@@ -166,22 +173,38 @@ class FPDF_TPL extends FPDF {
         }
         
         $tpl =& $this->tpls[$tplidx];
-        $x = $tpl['x'];
-        $y = $tpl['y'];
         $w = $tpl['w'];
         $h = $tpl['h'];
         
         if ($_x == null)
-            $_x = $x;
+            $_x = 0;
         if ($_y == null)
-            $_y = $y;
+            $_y = 0;
+            
+        $_x += $tpl['x'];
+        $_y += $tpl['y'];
+        
         $wh = $this->getTemplateSize($tplidx, $_w, $_h);
         $_w = $wh['w'];
         $_h = $wh['h'];
     
-        $this->_out(sprintf("q %.4f 0 0 %.4f %.2f %.2f cm", ($_w/$w), ($_h/$h), $_x*$this->k, ($this->h-($_y+$_h))*$this->k)); // Translate 
-        $this->_out($this->tplprefix.$tplidx." Do Q");
+        $tData = array(
+            'x' => $this->x,
+            'y' => $this->y,
+            'w' => $_w,
+            'h' => $_h,
+            'scaleX' => ($_w/$w),
+            'scaleY' => ($_h/$h),
+            'tx' => $_x,
+            'ty' =>  ($this->h-$_y-$_h),
+            'lty' => ($this->h-$_y-$_h) - ($this->h-$h) * ($_h/$h)
+        );
+        
+        $this->_out(sprintf("q %.4F 0 0 %.4F %.4F %.4F cm", $tData['scaleX'], $tData['scaleY'], $tData['tx']*$this->k, $tData['ty']*$this->k)); // Translate 
+        $this->_out(sprintf('%s%d Do Q', $this->tplprefix, $tplidx));
 
+        $this->lastUsedTemplateData = $tData;
+        
         return array("w" => $_w, "h" => $_h);
     }
     
@@ -217,18 +240,21 @@ class FPDF_TPL extends FPDF {
     }
     
     /**
-     * See FPDF-Documentation ;-)
+     * See FPDF/TCPDF-Documentation ;-)
      */
-    function SetFont($family, $style='', $size=0) {
+    function SetFont($family, $style='', $size=0, $fontfile='') {
+        if (!is_subclass_of($this, 'TCPDF') && func_num_args() > 3) {
+            $this->Error('More than 3 arguments for the SetFont method are only available in TCPDF.');
+        }
         /**
          * force the resetting of font changes in a template
          */
         if ($this->_intpl)
             $this->FontFamily = '';
             
-        parent::SetFont($family, $style, $size);
+        parent::SetFont($family, $style, $size, $fontfile);
        
-        $fontkey = $this->FontFamily.trim($this->FontStyle,'U');
+        $fontkey = $this->FontFamily.$this->FontStyle;
         
         if ($this->_intpl) {
             $this->_res['tpl'][$this->tpl]['fonts'][$fontkey] =& $this->fonts[$fontkey];
@@ -240,12 +266,12 @@ class FPDF_TPL extends FPDF {
     /**
      * See FPDF/TCPDF-Documentation ;-)
      */
-    function Image($file, $x, $y, $w=0, $h=0, $type='', $link='', $align='', $resize=false, $dpi=300) {
+    function Image($file, $x, $y, $w=0, $h=0, $type='', $link='', $align='', $resize=false, $dpi=300, $palign='', $ismask=false, $imgmask=false, $border=0) {
         if (!is_subclass_of($this, 'TCPDF') && func_num_args() > 7) {
             $this->Error('More than 7 arguments for the Image method are only available in TCPDF.');
         }
         
-        parent::Image($file, $x, $y, $w, $h, $type, $link, $align, $resize, $dpi);
+        parent::Image($file, $x, $y, $w, $h, $type, $link, $align, $resize, $dpi, $palign, $ismask, $imgmask, $border);
         if ($this->_intpl) {
             $this->_res['tpl'][$this->tpl]['images'][$file] =& $this->images[$file];
         } else {
@@ -267,10 +293,14 @@ class FPDF_TPL extends FPDF {
     /**
      * Preserve adding Links in Templates ...won't work
      */
-    function Link($x, $y, $w, $h, $link) {
+    function Link($x, $y, $w, $h, $link, $spaces=0) {
+        if (!is_subclass_of($this, 'TCPDF') && func_num_args() > 5) {
+            $this->Error('More than 7 arguments for the Image method are only available in TCPDF.');
+        }
+        
         if ($this->_intpl)
             $this->Error('Using links in templates aren\'t possible!');
-        parent::Link($x, $y, $w, $h, $link);
+        parent::Link($x, $y, $w, $h, $link, $spaces);
     }
     
     function AddLink() {
@@ -299,7 +329,23 @@ class FPDF_TPL extends FPDF {
     		$this->_out('<<'.$filter.'/Type /XObject');
             $this->_out('/Subtype /Form');
             $this->_out('/FormType 1');
-            $this->_out(sprintf('/BBox [%.2f %.2f %.2f %.2f]',$tpl['x']*$this->k, ($tpl['h']-$tpl['y'])*$this->k, $tpl['w']*$this->k, ($tpl['h']-$tpl['y']-$tpl['h'])*$this->k));
+            $this->_out(sprintf('/BBox [%.2F %.2F %.2F %.2F]',
+                // llx
+                $tpl['x'],
+                // lly
+                -$tpl['y'],
+                // urx
+                ($tpl['w']+$tpl['x'])*$this->k,
+                // ury
+                ($tpl['h']-$tpl['y'])*$this->k
+            ));
+            
+            if ($tpl['x'] != 0 || $tpl['y'] != 0) {
+                $this->_out(sprintf('/Matrix [1 0 0 1 %.5F %.5F]',
+                     -$tpl['x']*$this->k*2, $tpl['y']*$this->k*2
+                ));
+            }
+            
             $this->_out('/Resources ');
 
             $this->_out('<</ProcSet [/PDF /Text /ImageB /ImageC /ImageI]');
@@ -332,46 +378,12 @@ class FPDF_TPL extends FPDF {
     }
     
     /**
-     * Private Method
+     * Overwritten to add _putformxobjects() after _putimages()
+     *
      */
-    function _putresources() {
-        if (!is_subclass_of($this, 'TCPDF')) {
-            $this->_putfonts();
-        	$this->_putimages();
-        	$this->_putformxobjects();
-            //Resource dictionary
-        	$this->offsets[2]=strlen($this->buffer);
-        	$this->_out('2 0 obj');
-        	$this->_out('<<');
-        	$this->_putresourcedict();
-        	$this->_out('>>');
-    	   $this->_out('endobj');
-        } else {
-        	$this->_putextgstates();
-    		$this->_putocg();
-    		$this->_putfonts();
-    		$this->_putimages();
-    	  	$this->_putshaders();
-			$this->_putformxobjects();
-            //Resource dictionary
-    		$this->offsets[2]=strlen($this->buffer);
-    		$this->_out('2 0 obj');
-    		$this->_out('<<');
-    		$this->_putresourcedict();
-    		$this->_out('>>');
-    		$this->_out('endobj');
-    		$this->_putjavascript();
-    		$this->_putbookmarks();
-    		// encryption
-    		if ($this->encrypted) {
-    			$this->_newobj();
-    			$this->enc_obj_id = $this->n;
-    			$this->_out('<<');
-    			$this->_putencryption();
-    			$this->_out('>>');
-    			$this->_out('endobj');
-    		}
-        }
+    function _putimages() {
+        parent::_putimages();
+        $this->_putformxobjects();
     }
     
     function _putxobjectdict() {
@@ -379,7 +391,7 @@ class FPDF_TPL extends FPDF {
         
         if (count($this->tpls)) {
             foreach($this->tpls as $tplidx => $tpl) {
-                $this->_out($this->tplprefix.$tplidx.' '.$tpl['n'].' 0 R');
+                $this->_out(sprintf('%s%d %d 0 R', $this->tplprefix, $tplidx, $tpl['n']));
             }
         }
     }
